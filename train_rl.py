@@ -4,13 +4,15 @@ train_rl.py
 Tank 자율주행 RL 에이전트 학습 스크립트
 - stable-baselines3의 PPO 사용
 - 커스텀 콜백으로 학습 모니터링
+- 시각화 콜백으로 학습 과정 이미지 저장
 - 체크포인트 저장
 
 [사용법]
-    python train_rl.py --timesteps 500000 --save-path ./models
+    python train_rl.py train --timesteps 500000 --save-path ./models
+    python train_rl.py train --timesteps 500000 --viz
 
 [요구사항]
-    pip install stable-baselines3 gymnasium numpy
+    pip install stable-baselines3 gymnasium numpy matplotlib
 """
 
 import os
@@ -34,6 +36,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 # 로컬 모듈
 from rl_environment import TankNavEnv, SimConfig
+from visualization_callback import VisualizationCallback, LiveVisualizationCallback
 
 
 class TensorboardCallback(BaseCallback):
@@ -180,9 +183,9 @@ def make_env_fn(obstacles, height_map, slope_map, config, rank, seed=0):
 def train(
     total_timesteps: int = 500000,
     save_path: str = "./models",
-    obstacle_path: str = "ob_v2.json",
-    height_path: str = "height_map.npy",
-    slope_path: str = "slope_costmap.npy",
+    obstacle_path: str = "env_data/ob_v2.json",
+    height_path: str = "env_data/height_map.npy",
+    slope_path: str = "env_data/slope_costmap.npy",
     n_envs: int = 4,
     learning_rate: float = 3e-4,
     batch_size: int = 64,
@@ -192,6 +195,9 @@ def train(
     eval_freq: int = 10000,
     checkpoint_freq: int = 50000,
     tensorboard_log: str = "./tensorboard_logs",
+    enable_viz: bool = False,
+    viz_freq: int = 5000,
+    live_viz: bool = False,
 ):
     """
     RL 에이전트 학습 메인 함수
@@ -289,7 +295,38 @@ def train(
             deterministic=True,
         ),
     ]
-    
+
+    # 시각화 콜백 추가
+    if enable_viz:
+        viz_path = os.path.join(save_path, "visualizations")
+
+        if live_viz:
+            viz_callback = LiveVisualizationCallback(
+                save_path = viz_path,
+                save_freq = viz_freq,
+                episode_save_freq = 50,
+                update_freq=100,
+                show_lidar = True,
+                show_path = True,
+                show_trajectory = True,
+                show_obstacles = True,
+                verbose = 1,
+            )
+        else:
+            viz_callback = VisualizationCallback(
+                save_path=viz_path,
+                save_freq=viz_freq,
+                episode_save_freq=50,
+                show_lidar=True,
+                show_path=True,
+                show_trajectory=True,
+                show_obstacles=True,
+                show_heatmap=False,
+                verbose=1,
+            )
+        callbacks.append(viz_callback)
+        print(f"시각화 활성화: {viz_path}")
+
     # 학습 시작
     print(f"\n🏋️ 학습 시작 (총 {total_timesteps:,} 스텝)...")
     print(f"   - Tensorboard: tensorboard --logdir {tensorboard_log}")
@@ -328,9 +365,9 @@ def train(
 
 def evaluate(
     model_path: str,
-    obstacle_path: str = "ob_v2.json",
-    height_path: str = "height_map.npy",
-    slope_path: str = "slope_costmap.npy",
+    obstacle_path: str = "env_data/ob_v2.json",
+    height_path: str = "env_data/height_map.npy",
+    slope_path: str = "env_data/slope_costmap.npy",
     n_episodes: int = 10,
     render: bool = False,
 ):
@@ -414,20 +451,23 @@ def main():
     train_parser = subparsers.add_parser("train", help="Train the model")
     train_parser.add_argument("--timesteps", type=int, default=500000, help="Total timesteps")
     train_parser.add_argument("--save-path", type=str, default="./models", help="Model save path")
-    train_parser.add_argument("--obstacles", type=str, default="ob_v2.json", help="Obstacle JSON path")
-    train_parser.add_argument("--height", type=str, default="height_map.npy", help="Height map path")
-    train_parser.add_argument("--slope", type=str, default="slope_costmap.npy", help="Slope map path")
+    train_parser.add_argument("--obstacles", type=str, default="env_data/ob_v2.json", help="Obstacle JSON path")
+    train_parser.add_argument("--height", type=str, default="env_data/height_map.npy", help="Height map path")
+    train_parser.add_argument("--slope", type=str, default="env_data/slope_costmap.npy", help="Slope map path")
     train_parser.add_argument("--n-envs", type=int, default=4, help="Number of parallel environments")
     train_parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    train_parser.add_argument("--viz", action="store_true", help="Enable visualization")
+    train_parser.add_argument("--live-viz", action="store_true", help="Enable live visualization")
+    train_parser.add_argument("--viz-freq", type=int, default=5000, help="Visualization frequency")
     
     # 평가 명령
     eval_parser = subparsers.add_parser("eval", help="Evaluate the model")
     eval_parser.add_argument("--model", type=str, required=True, help="Model path")
-    eval_parser.add_argument("--obstacles", type=str, default="ob_v2.json", help="Obstacle JSON path")
-    eval_parser.add_argument("--height", type=str, default="height_map.npy", help="Height map path")
-    eval_parser.add_argument("--slope", type=str, default="slope_costmap.npy", help="Slope map path")
+    eval_parser.add_argument("--obstacles", type=str, default="env_data/ob_v2.json", help="Obstacle JSON path")
+    eval_parser.add_argument("--height", type=str, default="env_data/height_map.npy", help="Height map path")
+    eval_parser.add_argument("--slope", type=str, default="env_data/slope_costmap.npy", help="Slope map path")
     eval_parser.add_argument("--episodes", type=int, default=10, help="Number of episodes")
     eval_parser.add_argument("--render", action="store_true", help="Render visualization")
     
@@ -444,6 +484,9 @@ def main():
             learning_rate=args.lr,
             batch_size=args.batch_size,
             seed=args.seed,
+            enable_viz=args.viz,
+            viz_freq=args.viz_freq,
+            live_viz=args.live_viz,
         )
     
     elif args.command == "eval":
