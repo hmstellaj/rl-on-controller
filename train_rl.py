@@ -299,13 +299,18 @@ def train(
     # 시각화 콜백 추가
     if enable_viz:
         viz_path = os.path.join(save_path, "visualizations")
+        
+        render_freq = 25000 if live_viz else 0
         is_headless = not live_viz
+
         viz_callback = PygameVisualizationCallback(
             save_path=viz_path,
             save_freq=viz_freq,
             episode_save_freq=50,
             map_size=300.0,
             headless=is_headless,
+            render_freq=render_freq,
+            show_path=True,
             show_lidar=True
         )
         callbacks.append(viz_callback)

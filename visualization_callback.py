@@ -7,7 +7,9 @@ from typing import Optional, List, Tuple, Dict, Any
 
 class PygameVisualizationCallback(BaseCallback):
     """
-    Pygame 기반 시각화 콜백 (실시간 뷰 + 파일 저장)
+    Pygame 기반 시각화 콜백
+    - 기본으로 백그라운드 실행
+    - 지정된 주기마다 팝업 창 띄워서 에피소드 관전
     """
     
     def __init__(
@@ -20,6 +22,7 @@ class PygameVisualizationCallback(BaseCallback):
         show_lidar: bool = True,
         show_path: bool = True,
         headless: bool = False,   # <--- False로 설정하면 창이 뜹니다!
+        render_freq: int = 0,
         verbose: int = 1,
     ):
         super().__init__(verbose)
@@ -33,30 +36,25 @@ class PygameVisualizationCallback(BaseCallback):
         self.show_lidar = show_lidar
         self.show_path = show_path
         self.headless = headless
-        
+        self.render_freq = render_freq
+
+        # 윈도우 상태 관리
+        self.is_view_open = False
+        self.view_episode_count = 0
+        self.surface = pygame.Surface((window_size, window_size))
+        self.screen = None
+        self.font = None
+
         # Pygame 초기화
-        if self.headless:
-            # 창 없이 실행 (서버용)
-            os.environ["SDL_VIDEODRIVER"] = "dummy"
-        else:
-            # 실시간 창 띄우기 (로컬용)
-            if "SDL_VIDEODRIVER" in os.environ:
-                del os.environ["SDL_VIDEODRIVER"]
-            
         pygame.init()
-        
-        if self.headless:
-            # 오프스크린 서피스 (화면에 안보임)
-            self.surface = pygame.Surface((window_size, window_size))
-            self.screen = None
-        else:
-            # 실제 윈도우 창 생성
-            self.screen = pygame.display.set_mode((window_size, window_size))
-            self.surface = pygame.Surface((window_size, window_size)) # 더블 버퍼링용
-            pygame.display.set_caption("Tank RL Training Live View")
-            
         self.font = pygame.font.SysFont("Arial", 16)
-        
+
+        # render_freq 기반으로 창 띄우기
+        if not self.headless and self.render_freq == 0:
+            self._open_window()
+        elif self.headless:
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
+            
         # 상태 추적
         self.episode_count = 0
         self.current_episode_reward = 0
@@ -65,17 +63,36 @@ class PygameVisualizationCallback(BaseCallback):
         os.makedirs(os.path.join(save_path, "episodes"), exist_ok=True)
         os.makedirs(os.path.join(save_path, "steps"), exist_ok=True)
 
+    def _open_window(self):
+        if not self.is_view_open and not self.headless:
+            self.screen = pygame.display.set_mode((self.window_size, self.window_size))
+            pygame.display.set_caption(f"Tank RL Training Live View (Step {self.num_timesteps})")
+            self.is_view_open = True
+            self.view_episode_count = 0
+            print("Start Live View")
+
+    def _close_window(self):
+        if self.is_view_open:
+            pygame.display.quit()
+            self.screen = None
+            self.is_view_open = False
+            print("Finish Live View")
+
     def _on_step(self) -> bool:
         # 보상 추적
         if self.locals.get('rewards') is not None:
             self.current_episode_reward += self.locals['rewards'][0]
-            
-        # 1. 실시간 렌더링 (매 스텝 혹은 특정 주기로 실행)
-        # 매 스텝 그리면 학습이 너무 느려질 수 있으므로 5스텝마다 갱신
-        if not self.headless and self.num_timesteps % 5 == 0:
-             self._update_live_view()
 
-        # 2. 파일 저장 로직 (기존과 동일)
+        # 스크린 팝업 트리거 체크
+        if not self.headless and self.render_freq > 0:
+            if self.num_timesteps > 0 and self.num_timesteps % self.render_freq == 0:
+                self._open_window()
+        
+        # 창이 열려있을때 화면 갱신
+        if self.is_view_open:
+            self._update_live_view()
+
+        # 파일 저장 로직
         is_save_step = self.num_timesteps % self.save_freq == 0
         is_episode_end = self.locals.get('dones') is not None and self.locals['dones'][0]
         
@@ -102,13 +119,12 @@ class PygameVisualizationCallback(BaseCallback):
         """실시간 화면 갱신"""
         env = self._get_env()
         
-        # 윈도우 이벤트 처리 (중요: 이거 없으면 창이 응답 없음 뜸)
+        # 윈도우 이벤트 처리 (응답 없음 방지)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                # 창 닫아도 학습은 계속되게 할지, 종료할지 결정 (여기선 무시)
-                pass
-
-        # 서피스에 그림 그리기
+                self._close_window()
+        
+        env = self._get_env()
         self._render_to_surface(env, title=f"Step: {self.num_timesteps} | Reward: {self.current_episode_reward:.1f}")
         
         # 화면에 복사 및 갱신
@@ -118,6 +134,12 @@ class PygameVisualizationCallback(BaseCallback):
 
     def _on_episode_end(self, env):
         self.episode_count += 1
+
+        # 팝업 모드일때 에피소드가 끝나면 창 닫기
+        if self.is_view_open and self.render_freq > 0:
+            self.view_episode_count += 1
+            if self.view_episode_count >= 5:
+                self._close_window()
         
         if self.episode_count % self.episode_save_freq == 0:
             info = self.locals.get('infos', [{}])[0]
