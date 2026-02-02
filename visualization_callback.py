@@ -104,26 +104,34 @@ class VisualizationCallback(BaseCallback):
         """매 스텝마다 호출"""
         self.step_in_episode += 1
         
-        # 현재 환경에서 상태 가져오기
-        env = self.training_env.envs[0]
-        if hasattr(env, 'env'):
-            env = env.env  # Monitor wrapper 벗기기
+        # 1. 정보를 담고 있는 첫 번째 환경의 info 가져오기
+        info = self.locals['infos'][0] if 'infos' in self.locals else {}
         
-        if hasattr(env, 'state') and env.state is not None:
-            pos = (env.state.x, env.state.z)
-            self.current_trajectory.append(pos)
-            
+        # 2. 위치 추적 (환경 객체 대신 info['pos'] 사용)
+        if 'pos' in info:
+            self.current_trajectory.append(info['pos'])
+        
         # 보상 추적
         if self.locals.get('rewards') is not None:
             self.current_episode_reward += self.locals['rewards'][0]
         
-        # 주기적 스텝 저장
-        if self.num_timesteps % self.save_freq == 0:
-            self._save_step_visualization(env)
+        # 3. 환경 객체(env)는 '실제로 필요할 때만' 가져오기 (save_freq 또는 에피소드 종료 시)
+        is_save_step = self.num_timesteps % self.save_freq == 0
+        is_episode_end = self.locals.get('dones') is not None and self.locals['dones'][0]
         
-        # 에피소드 종료 체크
-        if self.locals.get('dones') is not None and self.locals['dones'][0]:
-            self._on_episode_end(env)
+        if is_save_step or is_episode_end:
+            # 이때만 무거운 get_attr을 호출합니다.
+            if hasattr(self.training_env, 'envs'):
+                env = self.training_env.envs[0]
+            else:
+                # SubprocVecEnv의 경우 원격 환경 객체(또는 그 복사본)를 가져옴
+                env = self.training_env.get_attr('env', indices=0)[0]
+                
+            if is_save_step:
+                self._save_step_visualization(env)
+                
+            if is_episode_end:
+                self._on_episode_end(env)
         
         return True
     

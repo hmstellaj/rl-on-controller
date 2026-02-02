@@ -240,6 +240,7 @@ class TankNavEnv(gym.Env):
         info = self._get_info()
         info['collision'] = collision
         info['reached_goal'] = reached_goal
+        info['pos'] = (self.state.x, self.state.z)
         
         return observation, reward, terminated, truncated, info
     
