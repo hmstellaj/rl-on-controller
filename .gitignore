@@ -7,6 +7,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Personal IGNORES
+tensorboard_logs/
+models/eval_logs/
+
 # C extensions
 *.so
 
