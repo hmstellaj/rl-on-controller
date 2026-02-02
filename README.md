@@ -9,68 +9,16 @@ Unity 시뮬레이터 기반 전차 자율주행 시스템
 
 ```
 tank_rl/
-├── rl_environment.py    # Gymnasium 환경 (학습용)
-├── rl_controller.py     # RL 컨트롤러 (추론용)
-├── train_rl.py          # 학습 스크립트
-├── server_rl.py         # Flask 서버 (시뮬레이터 연동)
-├── ob_v2.json           # 장애물 데이터
-├── height_map.npy       # 높이 맵
-├── slope_costmap.npy    # 경사도 맵
-└── models/              # 학습된 모델 저장 위치
+├── rl_environment.py      # Gymnasium 환경 (학습용)
+├── rl_controller.py       # RL 컨트롤러 (추론용)
+├── train_rl.py            # 학습 스크립트
+├── server_rl.py           # Flask 서버 (시뮬레이터 연동)
+└── env_data/              # 학습 환경 데이터
+  ├── ob_v2.json           # 장애물 데이터
+  ├── height_map.npy       # 높이 맵
+  └── slope_costmap.npy    # 경사도 맵
+└── models/                # 학습된 모델 저장 위치
     └── tank_nav_final.zip
-```
-
----
-
-## 🛠️ 설치
-
-```bash
-# 필수 패키지
-pip install flask numpy gymnasium stable-baselines3 matplotlib
-
-# (선택) 병렬 학습용
-pip install stable-baselines3[extra]
-```
-
----
-
-## 🎮 사용 방법
-
-### 1️⃣ 학습 (로컬, 시뮬레이터 없이)
-
-```bash
-# 기본 학습 (500K 스텝)
-python train_rl.py train --timesteps 500000
-
-# 상세 옵션
-python train_rl.py train \
-    --timesteps 1000000 \
-    --n-envs 8 \
-    --lr 0.0003 \
-    --save-path ./models
-
-# Tensorboard로 모니터링
-tensorboard --logdir ./tensorboard_logs
-```
-
-### 2️⃣ 평가
-
-```bash
-# 학습된 모델 평가
-python train_rl.py eval --model models/tank_nav_final.zip --episodes 10
-
-# 시각화 포함
-python train_rl.py eval --model models/tank_nav_final.zip --render
-```
-
-### 3️⃣ 서버 실행 (시뮬레이터 연동)
-
-```bash
-# RL 모델 사용
-python server_rl.py --model models/tank_nav_final.zip --port 5000
-
-# 모델 없이 (규칙 기반 폴백)
-python server_rl.py --port 5000
 ```
 
 ---
@@ -189,96 +137,6 @@ def calculate_reward():
 | `max_episode_steps` | 1500 | 최대 에피소드 길이 (300초) |
 | `lidar_num_rays` | 16 | 가상 라이다 레이 수 |
 | `lidar_max_range` | 30m | 라이다 최대 거리 |
-
----
-
-## 📈 예상 학습 결과
-
-```
-에피소드 1-500:     무작위 탐험, 성공률 ~5%
-에피소드 500-1500:  방향 학습, 성공률 ~30%
-에피소드 1500-3000: 장애물 회피 학습, 성공률 ~60%
-에피소드 3000+:     최적화, 성공률 ~80%+
-
-예상 학습 시간: 4-8시간 (4 병렬 환경, 500K 스텝)
-```
-
----
-
-## 🔧 기존 코드와 통합
-
-### hybrid_controller.py에서 사용하기
-
-```python
-from rl_controller import RLController
-
-class HybridController:
-    def __init__(self, ...):
-        # 기존 코드...
-        
-        # RL 컨트롤러 추가
-        self.rl_controller = RLController(
-            model_path="models/tank_nav_final.zip"
-        )
-    
-    def _seq13_astar_pid(self, curr_x, curr_z, curr_yaw):
-        # 경로가 없으면 생성
-        if not self.state.global_path:
-            self._generate_astar_path(curr_x, curr_z)
-        
-        # 타겟 포인트 선택
-        target_point, _ = self._select_target_point(curr_x, curr_z)
-        
-        # RL 제어 (PID 대체)
-        return self.rl_controller.get_action(
-            curr_x=curr_x,
-            curr_z=curr_z,
-            curr_yaw=curr_yaw,
-            target=target_point,
-            goal=self.state.destination,
-        )
-```
-
----
-
-## 🐛 트러블슈팅
-
-### 모델이 로드되지 않을 때
-```bash
-# stable-baselines3 설치 확인
-pip install stable-baselines3
-
-# 모델 경로 확인
-ls -la models/tank_nav_final.zip
-```
-
-### 학습이 느릴 때
-```bash
-# 병렬 환경 수 늘리기
-python train_rl.py train --n-envs 8
-
-# GPU 사용 확인 (PyTorch)
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-### 시뮬레이터 연결 실패
-```bash
-# 포트 확인
-netstat -an | grep 5000
-
-# 방화벽 확인 (Windows)
-# Unity에서 localhost:5000 으로 연결 설정
-```
-
----
-
-## 📝 TODO
-
-- [ ] A* 플래너 통합 (astar_planner.py import)
-- [ ] 경사도 기반 속도 조절 강화
-- [ ] Stuck 복구 로직 추가
-- [ ] 연속 행동 공간 (Box) 실험
-- [ ] SAC 알고리즘 비교 실험
 
 ---
 
