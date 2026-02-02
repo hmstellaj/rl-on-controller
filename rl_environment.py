@@ -60,7 +60,7 @@ class SimConfig:
     goal_threshold: float = 8.0  # 목표 도달 거리
     
     # 가상 라이다 설정
-    lidar_num_rays: int = 16
+    lidar_num_rays: int = 64
     lidar_max_range: float = 30.0
     
     # 보상 설정

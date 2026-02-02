@@ -24,7 +24,7 @@ import os
 class RLConfig:
     """RL 컨트롤러 설정"""
     # 라이다 설정
-    lidar_num_rays: int = 16
+    lidar_num_rays: int = 64
     lidar_max_range: float = 30.0
     
     # 정규화 상수
