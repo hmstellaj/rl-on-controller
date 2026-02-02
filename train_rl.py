@@ -36,7 +36,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 # 로컬 모듈
 from rl_environment import TankNavEnv, SimConfig
-from visualization_callback import VisualizationCallback, LiveVisualizationCallback
+from visualization_callback import PygameVisualizationCallback
 
 
 class TensorboardCallback(BaseCallback):
@@ -299,33 +299,18 @@ def train(
     # 시각화 콜백 추가
     if enable_viz:
         viz_path = os.path.join(save_path, "visualizations")
-
-        if live_viz:
-            viz_callback = LiveVisualizationCallback(
-                save_path = viz_path,
-                save_freq = viz_freq,
-                episode_save_freq = 50,
-                update_freq=100,
-                show_lidar = True,
-                show_path = True,
-                show_trajectory = True,
-                show_obstacles = True,
-                verbose = 1,
-            )
-        else:
-            viz_callback = VisualizationCallback(
-                save_path=viz_path,
-                save_freq=viz_freq,
-                episode_save_freq=50,
-                show_lidar=True,
-                show_path=True,
-                show_trajectory=True,
-                show_obstacles=True,
-                show_heatmap=False,
-                verbose=1,
-            )
+        is_headless = not live_viz
+        viz_callback = PygameVisualizationCallback(
+            save_path=viz_path,
+            save_freq=viz_freq,
+            episode_save_freq=50,
+            map_size=300.0,
+            headless=is_headless,
+            show_lidar=True
+        )
         callbacks.append(viz_callback)
-        print(f"시각화 활성화: {viz_path}")
+        mode_msg = "실시간 창 모드" if live_viz else "백그라운드 저장 모드"
+        print(f"시각화 활성화: {viz_path} ({mode_msg})")
 
     # 학습 시작
     print(f"\n🏋️ 학습 시작 (총 {total_timesteps:,} 스텝)...")
@@ -459,8 +444,8 @@ def main():
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
     train_parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    train_parser.add_argument("--live-viz", action="store_true", help="Enable live visualization")
     train_parser.add_argument("--viz-freq", type=int, default=5000, help="Visualization frequency")
+    train_parser.add_argument("--live-viz", action="store_true", help="Live visualization")
     
     # 평가 명령
     eval_parser = subparsers.add_parser("eval", help="Evaluate the model")
@@ -486,7 +471,7 @@ def main():
             seed=args.seed,
             enable_viz=args.viz,
             viz_freq=args.viz_freq,
-            live_viz=args.live_viz,
+            live_viz=args.live_viz
         )
     
     elif args.command == "eval":
