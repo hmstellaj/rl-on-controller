@@ -1,0 +1,22 @@
+# 파이썬 컴파일 파일들
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 가상환경 (Conda, venv 등)
+.venv/
+env/
+venv/
+ENV/
+project_env/
+
+# VS Code 설정
+.vscode/
+
+# OS 관련 파일
+.DS_Store
+Thumbs.db
+
+# 로그 및 체크포인트 (RL)
+*.log
+checkpoint/
