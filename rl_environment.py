@@ -49,7 +49,7 @@ class SimConfig:
     # 전차 설정
     tank_width: float = 3.667
     tank_length: float = 8.066
-    max_speed: float = 5.0  # m/s (추정)
+    max_speed: float = 11.3  # 시뮬레이터 weight가 0.5일때의 추정 속도
     max_turn_rate: float = 30.0  # deg/s (추정)
     
     # 시뮬레이션 설정
@@ -61,7 +61,7 @@ class SimConfig:
     
     # 가상 라이다 설정
     lidar_num_rays: int = 64
-    lidar_max_range: float = 30.0
+    lidar_max_range: float = 120.0 # 시뮬레이터 환경과 동기화
     
     # 보상 설정
     reward_goal: float = 1000.0
