@@ -61,7 +61,11 @@ class SimConfig:
     
     # 가상 라이다 설정
     lidar_num_rays: int = 64
-    lidar_max_range: float = 120.0 # 시뮬레이터 환경과 동기화
+    lidar_max_range: float = 50.0 # 시뮬레이터 환경과 동기화
+
+    # 안전 마진 설정
+    margin_critical: float = 0.1
+    margin_warning: float = 0.5
     
     # 보상 설정
     reward_goal: float = 1000.0
@@ -123,6 +127,23 @@ class TankNavEnv(gym.Env):
             low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
         
+        # 직사각형 전차 모델링
+        ## 라이다 각도 배열 생성
+        self.lidar_angles_rel = np.linspace(
+            0, 2 * np.pi, self.config.lidar_num_rays, endpoint=False
+        )
+
+        ## 각 ray별 중심 ~차체 표면 거리 계산
+        half_l = self.config.tank_length / 2.0
+        half_w = self.config.tank_width / 2.0
+        
+        ## 0으로 나누기 방지
+        abs_cos = np.maximum(np.abs(np.cos(self.lidar_angles_rel)), 1e-6)
+        abs_sin = np.maximum(np.abs(np.sin(self.lidar_angles_rel)), 1e-6)
+        
+        ## 직사각형의 기하학적 특성을 이용해 거리 계산
+        self.tank_boundary_dist = np.minimum(half_l / abs_cos, half_w / abs_sin)
+
         # 상태 변수
         self.state: Optional[TankState] = None
         self.target: Optional[Tuple[float, float]] = None
@@ -216,22 +237,25 @@ class TankNavEnv(gym.Env):
         
         # 2. 타겟 업데이트
         self._update_target()
+
+        # 3. 라이다 raycasting 수행
+        lidar_rays = self._cast_lidar_rays()
         
-        # 3. 충돌 체크
-        collision = self._check_collision()
+        # 4. 충돌 체크
+        collision, warning = self._check_collision_and_margin(lidar_rays)
         
-        # 4. 목표 도달 체크
+        # 5. 목표 도달 체크
         distance_to_goal = self._distance_to_goal()
         reached_goal = distance_to_goal < self.config.goal_threshold
         
-        # 5. 보상 계산
-        reward = self._calculate_reward(action, collision, reached_goal, distance_to_goal)
+        # 6. 보상 계산
+        reward = self._calculate_reward(action, collision, warning, reached_goal, distance_to_goal)
         
-        # 6. 종료 조건
+        # 7. 종료 조건
         terminated = reached_goal or collision
         truncated = self.step_count >= self.config.max_episode_steps
         
-        # 7. 상태 업데이트
+        # 8. 상태 업데이트
         self.prev_distance_to_goal = distance_to_goal
         self.prev_action = action
         self.trajectory.append((self.state.x, self.state.z))
@@ -350,35 +374,52 @@ class TankNavEnv(gym.Env):
             return self.slope_map[gz, gx]
         return 0.0
     
-    def _check_collision(self) -> bool:
+    def _check_collision_and_margin(self, lidar_rays: np.ndarray) -> Tuple[bool, bool]:
         """충돌 체크"""
+        
+        # LiDAR 기반 정밀 체크 (직사각형 모양 고려)
+        safety_margins = lidar_rays - self.tank_boundary_dist
+
+        is_lidar_collision = np.any(safety_margins < self.config.margin_critical)
+        is_warning = np.any((safety_margins >= self.config.margin_critical) & (safety_margins < self.config.margin_warning))
+
+        # 물리적 위치 기반 체크
         x, z = self.state.x, self.state.z
-        
-        # 전차 크기의 절반 + 마진
-        half_width = self.config.tank_width / 2 + 0.5
-        half_length = self.config.tank_length / 2 + 0.5
-        
-        # 간단한 AABB 충돌 체크 (회전 무시, 보수적으로)
-        tank_radius = max(half_width, half_length)
-        
-        for x_min, x_max, z_min, z_max in self.obstacle_rects:
-            # 장애물과 전차 중심 간 거리
-            closest_x = np.clip(x, x_min, x_max)
-            closest_z = np.clip(z, z_min, z_max)
-            dist = math.hypot(x - closest_x, z - closest_z)
-            
-            if dist < tank_radius:
-                self.collision_count += 1
-                return True
-        
+        is_physical_collision = False
+
         # 맵 경계 충돌
         margin = self.config.map_margin
         if x < margin or x > self.config.map_size - margin:
-            return True
+            is_physical_collision = True
         if z < margin or z > self.config.map_size - margin:
-            return True
+            is_physical_collision = True
         
-        return False
+        # 장애물 AABB 체크
+        if not is_physical_collision:
+            # 전차 크기의 절반 + 마진
+            half_width = self.config.tank_width / 2 + 0.5
+            half_length = self.config.tank_length / 2 + 0.5
+        
+            # 간단한 AABB 충돌 체크 (회전 무시, 보수적으로)
+            tank_radius = max(half_width, half_length)
+        
+            for x_min, x_max, z_min, z_max in self.obstacle_rects:
+                # 장애물과 전차 중심 간 거리
+                closest_x = np.clip(x, x_min, x_max)
+                closest_z = np.clip(z, z_min, z_max)
+                dist = math.hypot(x - closest_x, z - closest_z)
+                
+                if dist < tank_radius:
+                    is_physical_collision = True
+                    break
+        
+        # 결과 통합
+        final_collision = is_lidar_collision or is_physical_collision
+
+        if final_collision:
+            self.collision_count += 1
+
+        return final_collision, is_warning
     
     def _distance_to_goal(self) -> float:
         """목표까지 거리"""
@@ -474,7 +515,7 @@ class TankNavEnv(gym.Env):
         
         return obs
     
-    def _calculate_reward(self, action: int, collision: bool, reached_goal: bool, 
+    def _calculate_reward(self, action: int, collision: bool, warning: bool, reached_goal: bool, 
                           distance_to_goal: float) -> float:
         """보상 계산"""
         cfg = self.config
@@ -511,6 +552,9 @@ class TankNavEnv(gym.Env):
         # 7. 속도 보상 (움직이면 보상)
         if self.state.speed > 1.0:
             reward += 0.3
+
+        if warning:
+            reward -= 0.5
         
         return reward
     
