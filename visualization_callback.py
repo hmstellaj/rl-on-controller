@@ -1,226 +1,366 @@
+"""
+visualization_callback.py
+
+v9 스타일 시각화 콜백
+- 주기적으로 별도 환경에서 Pygame 창 띄워서 에피소드 관전
+- 학습 환경(SubprocVecEnv)과 분리되어 충돌 없음
+"""
+
 import os
-import math
 import numpy as np
 import pygame
+import math
 from stable_baselines3.common.callbacks import BaseCallback
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional
 
-class PygameVisualizationCallback(BaseCallback):
+
+class VisualEvalCallback(BaseCallback):
     """
-    Pygame 기반 시각화 콜백
-    - 기본으로 백그라운드 실행
-    - 지정된 주기마다 팝업 창 띄워서 에피소드 관전
+    v9 스타일 시각화 평가 콜백
+    
+    - eval_freq 스텝마다 Pygame 창 열어서 n_eval_episodes 에피소드 관전
+    - 학습 환경과 별도의 eval_env 사용 (SubprocVecEnv 충돌 방지)
     """
     
     def __init__(
         self,
-        save_path: str = "./viz",
-        save_freq: int = 5000,
-        episode_save_freq: int = 50,
-        map_size: float = 300.0,
-        window_size: int = 800,
-        show_lidar: bool = True,
-        show_path: bool = True,
-        headless: bool = False,   # <--- False로 설정하면 창이 뜹니다!
-        render_freq: int = 0,
+        eval_env,  # TankNavEnv 인스턴스 (render_mode=None으로 생성)
+        eval_freq: int = 25000,
+        n_eval_episodes: int = 3,
         verbose: int = 1,
     ):
         super().__init__(verbose)
+        self.eval_env = eval_env
+        self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        
+        # Pygame 설정
+        self.screen = None
+        self.clock = None
+        self.font = None
+        self.window_size = 850
+        self.scale = self.window_size / 300.0  # map_size=300 가정
+        
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_freq == 0 and self.n_calls > 0:
+            self._run_visual_eval()
+        return True
+    
+    def _run_visual_eval(self):
+        """Pygame 창 띄워서 에피소드 관전"""
+        if self.verbose:
+            print(f"\n🎮 Visual evaluation at step {self.n_calls}...")
+        
+        # Pygame 초기화
+        self._init_pygame()
+        
+        total_rewards = []
+        successes = 0
+        
+        for ep in range(self.n_eval_episodes):
+            obs, _ = self.eval_env.reset()
+            done = False
+            truncated = False
+            episode_reward = 0
+            step = 0
+            
+            while not (done or truncated):
+                # 모델 추론
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, reward, done, truncated, info = self.eval_env.step(action)
+                episode_reward += reward
+                step += 1
+                
+                # Pygame 렌더링
+                self._render_pygame(info, episode_reward, ep + 1, step)
+                
+                # 이벤트 처리 (창 닫기 등)
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self._close_pygame()
+                        return
+                
+                # FPS 제한
+                self.clock.tick(30)
+            
+            total_rewards.append(episode_reward)
+            if info.get('reached_goal', False):
+                successes += 1
+        
+        # 결과 출력
+        if self.verbose:
+            mean_reward = np.mean(total_rewards)
+            success_rate = successes / self.n_eval_episodes * 100
+            print(f"   ✅ Mean Reward: {mean_reward:.1f}, Success: {successes}/{self.n_eval_episodes} ({success_rate:.0f}%)")
+        
+        # Pygame 종료
+        self._close_pygame()
+    
+    def _init_pygame(self):
+        """Pygame 초기화"""
+        pygame.init()
+        self.screen = pygame.display.set_mode((self.window_size, self.window_size))
+        pygame.display.set_caption(f"Tank RL - Step {self.n_calls}")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 16)
+    
+    def _close_pygame(self):
+        """Pygame 종료"""
+        if self.screen is not None:
+            pygame.display.quit()
+            pygame.quit()
+            self.screen = None
+    
+    def _coord(self, x, z):
+        """월드 좌표 → 스크린 좌표"""
+        px = int(x * self.scale)
+        py = int(self.window_size - (z * self.scale))
+        return px, py
+    
+    def _render_pygame(self, info, episode_reward, episode_num, step):
+        """Pygame 렌더링"""
+        env = self.eval_env
+        
+        # 배경
+        self.screen.fill((240, 240, 240))
+        
+        # 장애물
+        if hasattr(env, 'obstacle_rects'):
+            for obs in env.obstacle_rects:
+                if isinstance(obs, tuple) and len(obs) == 4:
+                    x_min, x_max, z_min, z_max = obs
+                else:
+                    continue
+                
+                p1 = self._coord(x_min, z_max)
+                p2 = self._coord(x_max, z_min)
+                w = max(1, p2[0] - p1[0])
+                h = max(1, p2[1] - p1[1])
+                
+                # 크기별 색상
+                area = (x_max - x_min) * (z_max - z_min)
+                if area < 10:
+                    color = (34, 139, 34)  # 녹색
+                elif area < 100:
+                    color = (139, 90, 43)  # 갈색
+                else:
+                    color = (80, 80, 80)   # 회색
+                
+                pygame.draw.rect(self.screen, color, pygame.Rect(p1[0], p1[1], w, h))
+        
+        # 경로
+        if hasattr(env, 'path') and env.path and len(env.path) > 1:
+            points = [self._coord(p[0], p[1]) for p in env.path]
+            pygame.draw.lines(self.screen, (0, 0, 200), False, points, 2)
+        
+        # 궤적
+        if hasattr(env, 'trajectory') and len(env.trajectory) > 1:
+            points = [self._coord(p[0], p[1]) for p in env.trajectory[-200:]]
+            if len(points) > 1:
+                pygame.draw.lines(self.screen, (0, 180, 0), False, points, 2)
+        
+        # 목표
+        if hasattr(env, 'goal') and env.goal:
+            gx, gy = self._coord(env.goal[0], env.goal[1])
+            pygame.draw.circle(self.screen, (255, 50, 50), (gx, gy), 12)
+            pygame.draw.circle(self.screen, (200, 0, 0), (gx, gy), 6)
+        
+        # 타겟
+        if hasattr(env, 'target') and env.target:
+            tx, ty = self._coord(env.target[0], env.target[1])
+            pygame.draw.circle(self.screen, (0, 100, 255), (tx, ty), 6)
+        
+        # 전차
+        if hasattr(env, 'state') and env.state:
+            state = env.state
+            tank_x, tank_y = self._coord(state.x, state.z)
+            
+            # 라이다 그리기
+            if hasattr(env, '_cast_lidar_vectorized'):
+                lidar = env._cast_lidar_vectorized()
+                num_rays = len(lidar)
+                yaw_rad = math.radians(state.yaw)
+                
+                for i, dist in enumerate(lidar):
+                    angle = (i / num_rays) * 2 * math.pi + yaw_rad
+                    
+                    # 안전 거리에 따른 색상
+                    if hasattr(env, 'tank_boundary_dist'):
+                        margin = dist - env.tank_boundary_dist[i]
+                        if margin < env.config.margin_critical:
+                            color = (255, 0, 0)
+                        elif margin < env.config.margin_warning:
+                            color = (255, 180, 0)
+                        else:
+                            color = (0, 200, 0)
+                    else:
+                        color = (0, 200, 0)
+                    
+                    end_x = state.x + dist * math.cos(angle)
+                    end_z = state.z + dist * math.sin(angle)
+                    pygame.draw.line(self.screen, color, (tank_x, tank_y), 
+                                     self._coord(end_x, end_z), 1)
+            
+            # 전차 본체
+            yaw_rad = math.radians(state.yaw)
+            half_l = 4.0  # 시각적 크기
+            half_w = 2.0
+            
+            corners = [
+                (half_l, half_w), (half_l, -half_w),
+                (-half_l, -half_w), (-half_l, half_w)
+            ]
+            rot_corners = []
+            for lx, lz in corners:
+                # yaw=0 → +z 방향이므로 sin/cos 조합 주의
+                rx = lx * math.sin(yaw_rad) + lz * math.cos(yaw_rad)
+                rz = lx * math.cos(yaw_rad) - lz * math.sin(yaw_rad)
+                rot_corners.append(self._coord(state.x + rx, state.z + rz))
+            
+            pygame.draw.polygon(self.screen, (50, 120, 50), rot_corners)
+            
+            # 포탑
+            pygame.draw.circle(self.screen, (30, 80, 30), (tank_x, tank_y), 6)
+            
+            # 포신
+            cannon_len = 6.0
+            cannon_x = state.x + math.sin(yaw_rad) * cannon_len
+            cannon_z = state.z + math.cos(yaw_rad) * cannon_len
+            pygame.draw.line(self.screen, (20, 40, 20), (tank_x, tank_y),
+                             self._coord(cannon_x, cannon_z), 3)
+        
+        # 정보 패널
+        if self.font and hasattr(env, 'state') and env.state:
+            state = env.state
+            dist_to_goal = info.get('distance_to_goal', 0)
+            heading_err = info.get('heading_error', 0)
+            
+            lines = [
+                f"Training Step {self.n_calls:,}",
+                f"Episode {episode_num}/{self.n_eval_episodes}",
+                f"",
+                f"Pos: ({state.x:.1f}, {state.z:.1f})",
+                f"Yaw: {state.yaw:.1f} deg",
+                f"Speed: {state.speed:.1f} m/s",
+                f"",
+                f"Goal Dist: {dist_to_goal:.1f}m",
+                f"Head Err: {heading_err:.1f} deg",
+                f"",
+                f"Ep Step: {step}",
+                f"Ep Reward: {episode_reward:.1f}",
+            ]
+            
+            # 상태 표시
+            if info.get('collision', False):
+                lines.append("")
+                lines.append("!! COLLISION !!")
+            elif info.get('reached_goal', False):
+                lines.append("")
+                lines.append("** GOAL REACHED **")
+            
+            for i, line in enumerate(lines):
+                if "COLLISION" in line:
+                    color = (255, 0, 0)
+                elif "GOAL" in line:
+                    color = (0, 150, 0)
+                else:
+                    color = (0, 0, 0)
+                
+                text = self.font.render(line, True, color)
+                self.screen.blit(text, (10, 10 + i * 20))
+        
+        pygame.display.flip()
+
+
+class ImageSaveCallback(BaseCallback):
+    """
+    주기적으로 스냅샷 이미지 저장 (headless)
+    - Pygame 창 없이 이미지만 저장
+    - SubprocVecEnv에서도 안전
+    """
+    
+    def __init__(
+        self,
+        eval_env,
+        save_path: str = "./viz",
+        save_freq: int = 10000,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose)
+        self.eval_env = eval_env
         self.save_path = save_path
         self.save_freq = save_freq
-        self.episode_save_freq = episode_save_freq
-        self.map_size = map_size
-        self.window_size = window_size
-        self.scale = window_size / map_size
         
-        self.show_lidar = show_lidar
-        self.show_path = show_path
-        self.headless = headless
-        self.render_freq = render_freq
-
-        # 윈도우 상태 관리
-        self.is_view_open = False
-        self.view_episode_count = 0
-        self.surface = pygame.Surface((window_size, window_size))
-        self.screen = None
-        self.font = None
-
-        # Pygame 초기화
+        os.makedirs(save_path, exist_ok=True)
+        
+        # Surface for rendering
+        self.window_size = 800
+        self.scale = self.window_size / 300.0
         pygame.init()
-        self.font = pygame.font.SysFont("Arial", 16)
-
-        # render_freq 기반으로 창 띄우기
-        if not self.headless and self.render_freq == 0:
-            self._open_window()
-        elif self.headless:
-            os.environ["SDL_VIDEODRIVER"] = "dummy"
-            
-        # 상태 추적
-        self.episode_count = 0
-        self.current_episode_reward = 0
-        
-        # 저장 경로 생성
-        os.makedirs(os.path.join(save_path, "episodes"), exist_ok=True)
-        os.makedirs(os.path.join(save_path, "steps"), exist_ok=True)
-
-    def _open_window(self):
-        if not self.is_view_open and not self.headless:
-            self.screen = pygame.display.set_mode((self.window_size, self.window_size))
-            pygame.display.set_caption(f"Tank RL Training Live View (Step {self.num_timesteps})")
-            self.is_view_open = True
-            self.view_episode_count = 0
-            print("Start Live View")
-
-    def _close_window(self):
-        if self.is_view_open:
-            pygame.display.quit()
-            self.screen = None
-            self.is_view_open = False
-            print("Finish Live View")
-
+        self.surface = pygame.Surface((self.window_size, self.window_size))
+        self.font = pygame.font.SysFont("Arial", 14)
+    
     def _on_step(self) -> bool:
-        # 보상 추적
-        if self.locals.get('rewards') is not None:
-            self.current_episode_reward += self.locals['rewards'][0]
-
-        # 스크린 팝업 트리거 체크
-        if not self.headless and self.render_freq > 0:
-            if self.num_timesteps > 0 and self.num_timesteps % self.render_freq == 0:
-                self._open_window()
-        
-        # 창이 열려있을때 화면 갱신
-        if self.is_view_open:
-            self._update_live_view()
-
-        # 파일 저장 로직
-        is_save_step = self.num_timesteps % self.save_freq == 0
-        is_episode_end = self.locals.get('dones') is not None and self.locals['dones'][0]
-        
-        if is_save_step or is_episode_end:
-            env = self._get_env()
-            
-            if is_save_step:
-                filename = os.path.join(self.save_path, "steps", f"step_{self.num_timesteps:08d}.png")
-                self._render_to_surface(env, title=f"Step {self.num_timesteps}")
-                self._save_surface(filename)
-            
-            if is_episode_end:
-                self._on_episode_end(env)
-                
+        if self.n_calls % self.save_freq == 0 and self.n_calls > 0:
+            self._save_snapshot()
         return True
-
-    def _get_env(self):
-        if hasattr(self.training_env, 'envs'):
-            return self.training_env.envs[0]
-        else:
-            return self.training_env.get_attr('env', indices=0)[0]
-
-    def _update_live_view(self):
-        """실시간 화면 갱신"""
-        env = self._get_env()
+    
+    def _save_snapshot(self):
+        """스냅샷 저장"""
+        # 1 에피소드 실행
+        obs, _ = self.eval_env.reset()
+        done = False
+        truncated = False
         
-        # 윈도우 이벤트 처리 (응답 없음 방지)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self._close_window()
+        while not (done or truncated):
+            action, _ = self.model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = self.eval_env.step(action)
         
-        env = self._get_env()
-        self._render_to_surface(env, title=f"Step: {self.num_timesteps} | Reward: {self.current_episode_reward:.1f}")
+        # 마지막 프레임 저장
+        self._render_to_surface()
         
-        # 화면에 복사 및 갱신
-        if self.screen:
-            self.screen.blit(self.surface, (0, 0))
-            pygame.display.flip()
-
-    def _on_episode_end(self, env):
-        self.episode_count += 1
-
-        # 팝업 모드일때 에피소드가 끝나면 창 닫기
-        if self.is_view_open and self.render_freq > 0:
-            self.view_episode_count += 1
-            if self.view_episode_count >= 5:
-                self._close_window()
+        result = "GOAL" if info.get('reached_goal') else ("CRASH" if info.get('collision') else "TIME")
+        filename = os.path.join(self.save_path, f"step_{self.n_calls:08d}_{result}.png")
+        pygame.image.save(self.surface, filename)
         
-        if self.episode_count % self.episode_save_freq == 0:
-            info = self.locals.get('infos', [{}])[0]
-            result = "GOAL" if info.get('reached_goal') else ("CRASH" if info.get('collision') else "TIME")
-            filename = os.path.join(self.save_path, "episodes", f"ep_{self.episode_count:05d}_{result}.png")
-            
-            self._render_to_surface(env, title=f"Ep {self.episode_count} {result} (R={self.current_episode_reward:.0f})")
-            self._save_surface(filename)
-            
-        self.current_episode_reward = 0
-
+        if self.verbose:
+            print(f"💾 Snapshot saved: {filename}")
+    
     def _coord(self, x, z):
         px = int(x * self.scale)
         py = int(self.window_size - (z * self.scale))
         return px, py
-
-    def _save_surface(self, filename):
-        pygame.image.save(self.surface, filename)
-
-    def _render_to_surface(self, env, title=""):
-        """서피스에 현재 상태 그리기 (화면 표시/저장 공통)"""
-        # 1. 배경
+    
+    def _render_to_surface(self):
+        """Surface에 렌더링"""
+        env = self.eval_env
         self.surface.fill((240, 240, 240))
         
-        # 2. 장애물
+        # 장애물
         if hasattr(env, 'obstacle_rects'):
             for obs in env.obstacle_rects:
-                if isinstance(obs, tuple):
-                    xmin, xmax, zmin, zmax = obs
-                else:
-                    xmin, xmax = obs['x_min'], obs['x_max'], obs['z_min'], obs['z_max']
-                
-                x, y = self._coord(xmin, zmax)
-                w = (xmax - xmin) * self.scale
-                h = (zmax - zmin) * self.scale
-                pygame.draw.rect(self.surface, (100, 100, 100), (x, y, w, h))
-
-        # 3. 경로
-        if self.show_path and hasattr(env, 'path') and env.path:
-            points = [self._coord(p[0], p[1]) for p in env.path]
-            if len(points) > 1:
-                pygame.draw.lines(self.surface, (0, 0, 255), False, points, 2)
-            if env.goal:
-                gx, gy = self._coord(env.goal[0], env.goal[1])
-                pygame.draw.circle(self.surface, (255, 0, 0), (gx, gy), 8)
-
-        # 4. 전차
+                if isinstance(obs, tuple) and len(obs) == 4:
+                    x_min, x_max, z_min, z_max = obs
+                    p1 = self._coord(x_min, z_max)
+                    w = (x_max - x_min) * self.scale
+                    h = (z_max - z_min) * self.scale
+                    pygame.draw.rect(self.surface, (100, 100, 100), 
+                                     pygame.Rect(p1[0], p1[1], w, h))
+        
+        # 목표
+        if hasattr(env, 'goal') and env.goal:
+            gx, gy = self._coord(env.goal[0], env.goal[1])
+            pygame.draw.circle(self.surface, (255, 0, 0), (gx, gy), 8)
+        
+        # 궤적
+        if hasattr(env, 'trajectory') and len(env.trajectory) > 1:
+            points = [self._coord(p[0], p[1]) for p in env.trajectory]
+            pygame.draw.lines(self.surface, (0, 180, 0), False, points, 2)
+        
+        # 전차
         if hasattr(env, 'state') and env.state:
             tx, ty = self._coord(env.state.x, env.state.z)
-            
-            # 본체
-            pygame.draw.circle(self.surface, (0, 150, 0), (tx, ty), 6)
-            
-            # 헤딩 라인
-            rad = math.radians(env.state.yaw)
-            dx = math.sin(rad) * 15
-            dy = math.cos(rad) * 15
-            end_x = tx + dx
-            end_y = ty - dy
-            pygame.draw.line(self.surface, (0, 255, 0), (tx, ty), (end_x, end_y), 3)
-
-            # 5. 라이다
-            if self.show_lidar and hasattr(env, '_cast_lidar_rays'):
-                rays = env._cast_lidar_rays()
-                num_rays = len(rays)
-                max_range = env.config.lidar_max_range
-                
-                for i, dist in enumerate(rays):
-                    angle_offset = (i / num_rays) * 360 - 180
-                    ray_angle = env.state.yaw + angle_offset
-                    ray_rad = math.radians(ray_angle)
-                    
-                    lx = math.sin(ray_rad) * dist * self.scale
-                    ly = math.cos(ray_rad) * dist * self.scale
-                    
-                    color = (255, 0, 0) if dist < max_range - 0.1 else (0, 255, 0)
-                    pygame.draw.line(self.surface, color, (tx, ty), (tx + lx, ty - ly), 1)
-
-        # 6. 정보 텍스트
-        text = self.font.render(title, True, (0, 0, 0))
-        self.surface.blit(text, (10, 10))
-        
+            pygame.draw.circle(self.surface, (50, 100, 50), (tx, ty), 8)
+    
     def _on_training_end(self):
         pygame.quit()

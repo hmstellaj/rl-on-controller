@@ -3,16 +3,15 @@ train_rl.py
 
 Tank 자율주행 RL 에이전트 학습 스크립트
 - stable-baselines3의 PPO 사용
-- 커스텀 콜백으로 학습 모니터링
-- 시각화 콜백으로 학습 과정 이미지 저장
+- v9 스타일 시각화 (주기적으로 Pygame 창에서 관전)
 - 체크포인트 저장
 
 [사용법]
-    python train_rl.py train --timesteps 500000 --save-path ./models
-    python train_rl.py train --timesteps 500000 --viz
+    python train_rl.py train --timesteps 500000
+    python train_rl.py train --timesteps 500000 --viz --viz-freq 25000
 
 [요구사항]
-    pip install stable-baselines3 gymnasium numpy matplotlib
+    pip install stable-baselines3 gymnasium numpy pygame
 """
 
 import os
@@ -32,46 +31,33 @@ from stable_baselines3.common.callbacks import (
 )
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-from stable_baselines3.common.env_util import make_vec_env
 
 # 로컬 모듈
 from rl_environment import TankNavEnv, SimConfig
-from visualization_callback import PygameVisualizationCallback
+from visualization_callback import VisualEvalCallback, ImageSaveCallback
 
 
 class TensorboardCallback(BaseCallback):
-    """
-    커스텀 Tensorboard 로깅 콜백
-    """
+    """Tensorboard 로깅 콜백"""
     def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
         self.successes = []
         
     def _on_step(self) -> bool:
-        # 에피소드 완료 시 로깅
         if self.locals.get('dones') is not None:
             for idx, done in enumerate(self.locals['dones']):
                 if done:
                     info = self.locals['infos'][idx]
                     
-                    # 성공 여부
                     if info.get('reached_goal', False):
                         self.successes.append(1)
                     else:
                         self.successes.append(0)
                     
-                    # 최근 100 에피소드 성공률
                     if len(self.successes) >= 100:
                         success_rate = np.mean(self.successes[-100:])
                         self.logger.record('custom/success_rate_100', success_rate)
                     
-                    # 충돌 수
-                    collision_count = info.get('collision_count', 0)
-                    self.logger.record('custom/collision_count', collision_count)
-                    
-                    # 최종 거리
                     final_dist = info.get('distance_to_goal', 0)
                     self.logger.record('custom/final_distance', final_dist)
         
@@ -79,9 +65,7 @@ class TensorboardCallback(BaseCallback):
 
 
 class ProgressCallback(BaseCallback):
-    """
-    학습 진행 상황 출력 콜백
-    """
+    """학습 진행 상황 출력 콜백"""
     def __init__(self, total_timesteps: int, print_freq: int = 10000, verbose=1):
         super().__init__(verbose)
         self.total_timesteps = total_timesteps
@@ -91,7 +75,6 @@ class ProgressCallback(BaseCallback):
         self.recent_rewards = []
         
     def _on_step(self) -> bool:
-        # 에피소드 완료 체크
         if self.locals.get('dones') is not None:
             for idx, done in enumerate(self.locals['dones']):
                 if done:
@@ -101,11 +84,9 @@ class ProgressCallback(BaseCallback):
                     if info.get('reached_goal', False):
                         self.success_count += 1
                     
-                    # 보상 기록
                     if 'episode' in info:
                         self.recent_rewards.append(info['episode']['r'])
         
-        # 주기적 출력
         if self.num_timesteps % self.print_freq == 0:
             progress = self.num_timesteps / self.total_timesteps * 100
             
@@ -149,23 +130,6 @@ def load_terrain_data(height_path: str, slope_path: str):
     return height_map, slope_map
 
 
-def create_env(
-    obstacles: list,
-    height_map: Optional[np.ndarray] = None,
-    slope_map: Optional[np.ndarray] = None,
-    config: Optional[SimConfig] = None,
-    use_path: bool = True,
-) -> TankNavEnv:
-    """환경 생성 헬퍼"""
-    env = TankNavEnv(
-        obstacles=obstacles,
-        height_map=height_map,
-        slope_map=slope_map,
-        config=config,
-    )
-    return Monitor(env)
-
-
 def make_env_fn(obstacles, height_map, slope_map, config, rank, seed=0):
     """병렬 환경 생성 함수"""
     def _init():
@@ -196,17 +160,14 @@ def train(
     checkpoint_freq: int = 50000,
     tensorboard_log: str = "./tensorboard_logs",
     enable_viz: bool = False,
-    viz_freq: int = 5000,
-    live_viz: bool = False,
+    viz_freq: int = 25000,
+    n_viz_episodes: int = 3,
 ):
-    """
-    RL 에이전트 학습 메인 함수
-    """
+    """RL 에이전트 학습"""
     print("="*60)
     print("🚀 Tank Navigation RL 학습 시작")
     print("="*60)
     
-    # 저장 경로 생성
     os.makedirs(save_path, exist_ok=True)
     os.makedirs(tensorboard_log, exist_ok=True)
     
@@ -244,10 +205,18 @@ def train(
             make_env_fn(obstacles, height_map, slope_map, config, 0, seed)
         ])
     
-    # 평가용 환경
+    # 평가용 환경 (별도)
     eval_env = DummyVecEnv([
         make_env_fn(obstacles, height_map, slope_map, config, 0, seed + 1000)
     ])
+    
+    # 시각화용 환경 (별도, 단일 환경)
+    viz_env = TankNavEnv(
+        obstacles=obstacles,
+        height_map=height_map,
+        slope_map=slope_map,
+        config=config,
+    )
     
     # PPO 모델 생성
     print("\n🧠 PPO 모델 생성 중...")
@@ -262,7 +231,7 @@ def train(
         gamma=gamma,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,  # 탐험 장려
+        ent_coef=0.01,
         vf_coef=0.5,
         max_grad_norm=0.5,
         verbose=1,
@@ -274,8 +243,7 @@ def train(
     print(f"✅ 모델 생성 완료")
     print(f"   - Policy: MlpPolicy")
     print(f"   - Learning rate: {learning_rate}")
-    print(f"   - Batch size: {batch_size}")
-    print(f"   - Gamma: {gamma}")
+    print(f"   - n_envs: {n_envs}")
     
     # 콜백 설정
     callbacks = [
@@ -295,28 +263,18 @@ def train(
             deterministic=True,
         ),
     ]
-
-    # 시각화 콜백 추가
+    
+    # 시각화 콜백 추가 (v9 스타일)
     if enable_viz:
-        viz_path = os.path.join(save_path, "visualizations")
-        
-        render_freq = 25000 if live_viz else 0
-        is_headless = not live_viz
-
-        viz_callback = PygameVisualizationCallback(
-            save_path=viz_path,
-            save_freq=viz_freq,
-            episode_save_freq=50,
-            map_size=300.0,
-            headless=is_headless,
-            render_freq=render_freq,
-            show_path=True,
-            show_lidar=True
+        visual_callback = VisualEvalCallback(
+            eval_env=viz_env,
+            eval_freq=viz_freq,
+            n_eval_episodes=n_viz_episodes,
+            verbose=1,
         )
-        callbacks.append(viz_callback)
-        mode_msg = "실시간 창 모드" if live_viz else "백그라운드 저장 모드"
-        print(f"시각화 활성화: {viz_path} ({mode_msg})")
-
+        callbacks.append(visual_callback)
+        print(f"📊 시각화 활성화: {viz_freq} 스텝마다 {n_viz_episodes} 에피소드 관전")
+    
     # 학습 시작
     print(f"\n🏋️ 학습 시작 (총 {total_timesteps:,} 스텝)...")
     print(f"   - Tensorboard: tensorboard --logdir {tensorboard_log}")
@@ -361,14 +319,11 @@ def evaluate(
     n_episodes: int = 10,
     render: bool = False,
 ):
-    """
-    학습된 모델 평가
-    """
+    """학습된 모델 평가"""
     print("="*60)
     print("📊 모델 평가")
     print("="*60)
     
-    # 데이터 로드
     obstacles = []
     if os.path.exists(obstacle_path):
         obstacles = load_obstacles(obstacle_path)
@@ -377,21 +332,17 @@ def evaluate(
     
     config = SimConfig()
     
-    # 환경 생성
-    render_mode = "human" if render else None
     env = TankNavEnv(
         obstacles=obstacles,
         height_map=height_map,
         slope_map=slope_map,
         config=config,
-        render_mode=render_mode,
+        render_mode="human" if render else None,
     )
     
-    # 모델 로드
     model = PPO.load(model_path)
     print(f"✅ 모델 로드: {model_path}")
     
-    # 평가
     successes = 0
     total_rewards = []
     total_steps = []
@@ -423,7 +374,6 @@ def evaluate(
     
     env.close()
     
-    # 결과 출력
     print("\n" + "="*60)
     print(f"📊 평가 결과 ({n_episodes} 에피소드)")
     print(f"   - 성공률: {successes/n_episodes*100:.1f}%")
@@ -448,9 +398,9 @@ def main():
     train_parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     train_parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
     train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    train_parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    train_parser.add_argument("--viz-freq", type=int, default=5000, help="Visualization frequency")
-    train_parser.add_argument("--live-viz", action="store_true", help="Live visualization")
+    train_parser.add_argument("--viz", action="store_true", help="Enable visual evaluation")
+    train_parser.add_argument("--viz-freq", type=int, default=25000, help="Visual eval frequency (steps)")
+    train_parser.add_argument("--viz-episodes", type=int, default=3, help="Episodes per visual eval")
     
     # 평가 명령
     eval_parser = subparsers.add_parser("eval", help="Evaluate the model")
@@ -476,7 +426,7 @@ def main():
             seed=args.seed,
             enable_viz=args.viz,
             viz_freq=args.viz_freq,
-            live_viz=args.live_viz
+            n_viz_episodes=args.viz_episodes,
         )
     
     elif args.command == "eval":

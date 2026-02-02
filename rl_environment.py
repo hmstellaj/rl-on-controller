@@ -10,7 +10,7 @@ Tank 자율주행을 위한 Gymnasium 환경
 - 목표 방향 오차 (정규화)
 - 목표까지 거리 (정규화)
 - 현재 속도
-- 가상 라이다 (16방향)
+- 가상 라이다 (64방향)
 
 [Action Space]
 - Discrete(6): 전진, 전진+좌회전, 전진+우회전, 제자리좌회전, 제자리우회전, 정지
@@ -100,6 +100,13 @@ class TankNavEnv(gym.Env):
         # 장애물 로드
         self.obstacles = obstacles or []
         self.obstacle_rects = self._convert_obstacles(self.obstacles)
+
+        self._add_walls()
+
+        if self.obstacle_rects:
+            self.obstacles_np = np.array(self.obstacle_rects, dtype=np.float32)
+        else:
+            self.obstacles_np = np.zeros((0, 4), dtype = np.float32)
         
         # 지형 데이터
         self.height_map = height_map
@@ -168,6 +175,17 @@ class TankNavEnv(gym.Env):
                 obs['z_min'], obs['z_max']
             ))
         return rects
+    
+    def _add_walls(self):
+        '''맵 경계 벽 추가'''
+        size = self.config.map_size
+        walls = [
+            (-5.0, 0.0, -10.0, size + 10.0),
+            (size, size + 5, -10.0, size + 10),
+            (-10.0, size + 10, -5.0, 0.0),
+            (-10.0, size + 10, size, size + 5)
+        ]
+        self.obstacle_rects.extend(walls)
     
     def reset(
         self,
@@ -239,7 +257,7 @@ class TankNavEnv(gym.Env):
         self._update_target()
 
         # 3. 라이다 raycasting 수행
-        lidar_rays = self._cast_lidar_rays()
+        lidar_rays = self._cast_lidar_vectorized()
         
         # 4. 충돌 체크
         collision, warning = self._check_collision_and_margin(lidar_rays)
@@ -396,12 +414,7 @@ class TankNavEnv(gym.Env):
         
         # 장애물 AABB 체크
         if not is_physical_collision:
-            # 전차 크기의 절반 + 마진
-            half_width = self.config.tank_width / 2 + 0.5
-            half_length = self.config.tank_length / 2 + 0.5
-        
-            # 간단한 AABB 충돌 체크 (회전 무시, 보수적으로)
-            tank_radius = max(half_width, half_length)
+            tank_radius = max(self.config.tank_width, self.config.tank_length) / 2 + 0.5
         
             for x_min, x_max, z_min, z_max in self.obstacle_rects:
                 # 장애물과 전차 중심 간 거리
@@ -449,52 +462,62 @@ class TankNavEnv(gym.Env):
         
         return error
     
-    def _cast_lidar_rays(self) -> np.ndarray:
+    def _cast_lidar_vectorized(self) -> np.ndarray:
         """가상 라이다 레이캐스팅"""
         num_rays = self.config.lidar_num_rays
         max_range = self.config.lidar_max_range
+
+        if len(self.obstacle_rects) == 0:
+            return np.full(num_rays, max_range, dtype=np.float32)
         
-        rays = np.full(num_rays, max_range)
+        yaw_rad = math.radians(self.state.yaw)
+        ray_angles = self.lidar_angles_rel + yaw_rad
+
+        ray_dirs = np.stack([np.cos(ray_angles), np.sin(ray_angles)], axis=1)
+        ray_dirs_exp = ray_dirs[:, np.newaxis, :]
+        obs_exp = self.obstacles_np[np.newaxis, :, :]
+
+        pos_x, pos_z = self.state.x, self.state.z
         
-        for i in range(num_rays):
-            # 각 레이의 각도 (전차 기준)
-            angle_offset = (i / num_rays) * 360 - 180  # -180 ~ 180
-            ray_angle = self.state.yaw + angle_offset
-            ray_angle_rad = math.radians(ray_angle)
-            
-            # 레이 방향
-            ray_dx = math.sin(ray_angle_rad)
-            ray_dz = math.cos(ray_angle_rad)
-            
-            # 레이캐스팅 (간단한 step 방식)
-            step_size = 1.0
-            for d in np.arange(step_size, max_range, step_size):
-                check_x = self.state.x + ray_dx * d
-                check_z = self.state.z + ray_dz * d
-                
-                # 맵 경계
-                margin = self.config.map_margin
-                if check_x < margin or check_x > self.config.map_size - margin:
-                    rays[i] = d
-                    break
-                if check_z < margin or check_z > self.config.map_size - margin:
-                    rays[i] = d
-                    break
-                
-                # 장애물 체크
-                hit = False
-                for x_min, x_max, z_min, z_max in self.obstacle_rects:
-                    if x_min <= check_x <= x_max and z_min <= check_z <= z_max:
-                        rays[i] = d
-                        hit = True
-                        break
-                if hit:
-                    break
+        # 0으로 나누기 방지
+        dir_x = np.where(np.abs(ray_dirs_exp[..., 0]) < 1e-6, 1e-6, ray_dirs_exp[..., 0])
+        dir_z = np.where(np.abs(ray_dirs_exp[..., 1]) < 1e-6, 1e-6, ray_dirs_exp[..., 1])
         
-        return rays
+        # AABB 슬랩 교차 계산
+        # obs_exp[..., 0] = x_min, [1] = x_max, [2] = z_min, [3] = z_max
+        t1 = (obs_exp[..., 0] - pos_x) / dir_x
+        t2 = (obs_exp[..., 1] - pos_x) / dir_x
+        t3 = (obs_exp[..., 2] - pos_z) / dir_z
+        t4 = (obs_exp[..., 3] - pos_z) / dir_z
+        
+        t_enter = np.maximum(np.minimum(t1, t2), np.minimum(t3, t4))
+        t_exit = np.minimum(np.maximum(t1, t2), np.maximum(t3, t4))
+        
+        # 유효한 교차 (레이가 박스를 통과)
+        mask = (t_enter < t_exit) & (t_exit > 0)
+        
+        # 교차 거리 (교차 안하면 inf)
+        dist = np.where(mask, t_enter, np.inf)
+        
+        # 레이 시작점이 박스 내부에 있는 경우
+        inside = (t_enter < 0) & (t_exit > 0)
+        dist = np.where(inside, 0.0, dist)
+        
+        # 각 레이별 최소 거리
+        min_dists = np.min(dist, axis=1)
+        
+        # 범위 클리핑
+        lidar_data = np.clip(min_dists, 0, max_range).astype(np.float32)
+        
+        return lidar_data
     
-    def _get_observation(self) -> np.ndarray:
+    def _get_observation(self, lidar_rays: Optional[np.array]=None) -> np.ndarray:
         """관측 벡터 생성"""
+
+        if lidar_rays is None:
+            lidar_rays = self._cast_lidar_rays()
+        lidar = lidar_rays / self.config.lidar_max_range
+
         # Heading error (정규화)
         heading_error = self._heading_error() / 180.0
         
@@ -506,9 +529,6 @@ class TankNavEnv(gym.Env):
         
         # Goal distance (정규화)
         goal_dist = min(self._distance_to_goal() / 300.0, 1.0)
-        
-        # Lidar rays (정규화)
-        lidar = self._cast_lidar_rays() / self.config.lidar_max_range
         
         obs = np.array([heading_error, target_dist, speed_norm, goal_dist] + lidar.tolist(), 
                        dtype=np.float32)

@@ -25,7 +25,7 @@ class RLConfig:
     """RL 컨트롤러 설정"""
     # 라이다 설정
     lidar_num_rays: int = 64
-    lidar_max_range: float = 120.0 # 시뮬레이터 환경과 동기화
+    lidar_max_range: float = 50.0 # 시뮬레이터 환경과 동기화
     
     # 정규화 상수
     max_speed: float = 11.3
